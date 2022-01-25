@@ -40,6 +40,8 @@ func pgRun(t *testing.T, fn func(*pgTest)) {
 		for version, port := range map[string]int{"10": 5430, "11": 5431, "12": 5432, "13": 5433, "14": 5434} {
 			db, err := sql.Open("postgres", fmt.Sprintf("host=localhost port=%d user=postgres dbname=test password=pass sslmode=disable", port))
 			require.NoError(t, err)
+			_, err = db.Exec("CREATE SCHEMA IF NOT EXISTS PUBLIC")
+			require.NoError(t, err)
 			drv, err := postgres.Open(db)
 			require.NoError(t, err)
 			pgTests.drivers[version] = &pgTest{db: db, drv: drv, version: version, port: port}
@@ -437,7 +439,7 @@ schema "second" {
 func (t *pgTest) applyRealmHcl(spec string) {
 	realm := t.loadRealm()
 	var desired schema.Realm
-	err := mysql.UnmarshalHCL([]byte(spec), &desired)
+	err := postgres.UnmarshalHCL([]byte(spec), &desired)
 	require.NoError(t, err)
 	diff, err := t.drv.RealmDiff(realm, &desired)
 	require.NoError(t, err)
@@ -476,6 +478,39 @@ func TestPostgres_CLI(t *testing.T) {
 	t.Run("SchemaDiffRun", func(t *testing.T) {
 		pgRun(t, func(t *pgTest) {
 			testCLISchemaDiff(t, t.dsn())
+		})
+	})
+}
+
+func TestPostgres_CLI_MultiSchema(t *testing.T) {
+	t.Run("SchemaInspect", func(t *testing.T) {
+		h := `
+			schema "public" {
+			}
+			schema "test1" {	
+			}
+			table "users" {
+				schema = schema.test1
+				column "id" {
+					type = integer
+				}
+				primary_key {
+					columns = [table.users.column.id]
+				}
+			}
+			schema "test2" {	
+			}
+			table "users" {
+				schema = schema.test2
+				column "id" {
+					type = integer
+				}
+				primary_key {
+					columns = [table.users.column.id]
+				}
+			}`
+		pgRun(t, func(t *pgTest) {
+			testCLIMultiSchemaInspect(t, h, t.dsn(), []string{"test1", "test2", "public"}, postgres.UnmarshalHCL)
 		})
 	})
 }
@@ -1048,8 +1083,14 @@ func (t *pgTest) dropSchemas(names ...string) {
 }
 
 func (t *pgTest) dropDB(names ...string) {
-	t.Cleanup(func() {
-		_, err := t.db.Exec("DROP DATABASE IF EXISTS " + strings.Join(names, ", "))
+	for _, n := range names {
+		_, err := t.db.Exec("DROP SCHEMA IF EXISTS " + n + " CASCADE")
 		require.NoError(t.T, err, "drop db %q", names)
+	}
+	t.Cleanup(func() {
+		for _, n := range names {
+			_, err := t.db.Exec("DROP SCHEMA IF EXISTS " + n + " CASCADE")
+			require.NoError(t.T, err, "drop db %q", names)
+		}
 	})
 }

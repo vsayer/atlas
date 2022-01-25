@@ -42,6 +42,11 @@ func myRun(t *testing.T, fn func(*myTest)) {
 	myTests.Do(func() {
 		myTests.drivers = make(map[string]*myTest)
 		for version, port := range map[string]int{"56": 3306, "57": 3307, "8": 3308, "Maria107": 4306, "Maria102": 4307, "Maria103": 4308} {
+			tdb, err := sql.Open("mysql", fmt.Sprintf("root:pass@tcp(localhost:%d)/", port))
+			require.NoError(t, err)
+			tdb.Close()
+			_, err = tdb.Exec("CREATE DATABASE IF NOT EXISTS test")
+			require.NoError(t, err)
 			db, err := sql.Open("mysql", fmt.Sprintf("root:pass@tcp(localhost:%d)/test?parseTime=True", port))
 			require.NoError(t, err)
 			drv, err := mysql.Open(db)
@@ -509,8 +514,7 @@ schema "test" {
 }
 
 func TestMySQL_CLI(t *testing.T) {
-	t.Run("SchemaInspect", func(t *testing.T) {
-		h := `
+	h := `
 			schema "test" {
 				charset   = "%s"
 				collation = "%s"
@@ -524,14 +528,41 @@ func TestMySQL_CLI(t *testing.T) {
 					columns = [table.users.column.id]
 				}
 			}`
+	t.Run("SchemaInspect", func(t *testing.T) {
 		myRun(t, func(t *myTest) {
 			attrs := t.defaultAttrs()
 			charset, collate := attrs[0].(*schema.Charset), attrs[1].(*schema.Collation)
 			testCLISchemaInspect(t, fmt.Sprintf(h, charset.V, collate.V), t.dsn("test"), mysql.UnmarshalHCL)
 		})
 	})
-	t.Run("SchemaInspectMultiSchema", func(t *testing.T) {
+	t.Run("SchemaApply", func(t *testing.T) {
+		myRun(t, func(t *myTest) {
+			attrs := t.defaultAttrs()
+			charset, collate := attrs[0].(*schema.Charset), attrs[1].(*schema.Collation)
+			testCLISchemaApply(t, fmt.Sprintf(h, charset.V, collate.V), t.dsn("test"))
+		})
+	})
+	t.Run("SchemaApplyDryRun", func(t *testing.T) {
+		myRun(t, func(t *myTest) {
+			attrs := t.defaultAttrs()
+			charset, collate := attrs[0].(*schema.Charset), attrs[1].(*schema.Collation)
+			testCLISchemaApplyDry(t, fmt.Sprintf(h, charset.V, collate.V), t.dsn("test"))
+		})
+	})
+	t.Run("SchemaDiffRun", func(t *testing.T) {
+		myRun(t, func(t *myTest) {
+			testCLISchemaDiff(t, t.dsn("test"))
+		})
+	})
+}
+
+func TestMySQL_CLI_MultiSchema(t *testing.T) {
+	t.Run("SchemaInspect", func(t *testing.T) {
 		h := `
+			schema "test" {
+				charset   = "%s"
+				collation = "%s"
+			}
 			schema "test1" {
 				charset   = "%s"
 				collation = "%s"
@@ -561,54 +592,7 @@ func TestMySQL_CLI(t *testing.T) {
 		myRun(t, func(t *myTest) {
 			attrs := t.defaultAttrs()
 			charset, collate := attrs[0].(*schema.Charset), attrs[1].(*schema.Collation)
-			testCLISchemaInspectMultiSchema(t, fmt.Sprintf(h, charset.V, collate.V), t.dsn(""), []string{"test1", "test2"}, mysql.UnmarshalHCL)
-		})
-	})
-	t.Run("SchemaApply", func(t *testing.T) {
-		h := `
-			schema "test" {
-				charset   = "%s"
-				collation = "%s"
-			}
-			table "users" {
-				schema = schema.test
-				column "id" {
-					type = int
-				}
-				primary_key {
-					columns = [table.users.column.id]
-				}
-			}`
-		myRun(t, func(t *myTest) {
-			attrs := t.defaultAttrs()
-			charset, collate := attrs[0].(*schema.Charset), attrs[1].(*schema.Collation)
-			testCLISchemaApply(t, fmt.Sprintf(h, charset.V, collate.V), t.dsn("test"))
-		})
-	})
-	t.Run("SchemaApplyDryRun", func(t *testing.T) {
-		h := `
-			schema "test" {
-				charset   = "%s"
-				collation = "%s"
-			}
-			table "users" {
-				schema = schema.test
-				column "id" {
-					type = int
-				}
-				primary_key {
-					columns = [table.users.column.id]
-				}
-			}`
-		myRun(t, func(t *myTest) {
-			attrs := t.defaultAttrs()
-			charset, collate := attrs[0].(*schema.Charset), attrs[1].(*schema.Collation)
-			testCLISchemaApplyDry(t, fmt.Sprintf(h, charset.V, collate.V), t.dsn("test"))
-		})
-	})
-	t.Run("SchemaDiffRun", func(t *testing.T) {
-		myRun(t, func(t *myTest) {
-			testCLISchemaDiff(t, t.dsn("test"))
+			testCLIMultiSchemaInspect(t, fmt.Sprintf(h, charset.V, h, charset.V, collate.V, charset.V, collate.V), t.dsn(""), []string{"test1", "test2", "test"}, mysql.UnmarshalHCL)
 		})
 	})
 }
@@ -1153,9 +1137,16 @@ func (t *myTest) dropTables(names ...string) {
 }
 
 func (t *myTest) dropDB(names ...string) {
-	t.Cleanup(func() {
-		_, err := t.db.Exec("DROP DATABASE IF EXISTS " + strings.Join(names, ", "))
+	for _, n := range names {
+		_, err := t.db.Exec("DROP DATABASE IF EXISTS " + n)
 		require.NoError(t.T, err, "drop db %q", names)
+	}
+	t.Cleanup(func() {
+		for _, n := range names {
+			_, err := t.db.Exec("DROP DATABASE IF EXISTS " + n)
+			require.NoError(t.T, err, "drop db %q", names)
+		}
+
 	})
 }
 
